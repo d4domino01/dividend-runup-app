@@ -107,10 +107,27 @@ if st.button("Run Backtest"):
     st.info("Filtering for proven tickers...")
     valid = get_proven_tickers(tickers, buy_days, sell_days, years_back, min_trades, min_success_rate)
 
-    if not valid:
-        st.error("No tickers met the proven run-up criteria.")
+if not valid:
+    st.error("No tickers met the proven run-up criteria.")
+else:
+    st.success(f"{len(valid)} proven tickers found: {', '.join(valid)}")
+
+    df = simulate_strategy(valid, buy_days, sell_days, years_back, starting_capital)
+
+    if not df.empty and "Sell Date" in df.columns and "Portfolio Value" in df.columns:
+        df["Sell Date"] = pd.to_datetime(df["Sell Date"])
+        df = df.sort_values("Sell Date")
+        st.line_chart(df.set_index("Sell Date")["Portfolio Value"])
+        st.dataframe(df)
+
+        if not df["Portfolio Value"].empty:
+            final_value = df["Portfolio Value"].iloc[-1]
+            total_return = (final_value / starting_capital - 1) * 100
+            st.metric("Final Portfolio Value", f"${final_value:,.2f}", f"{total_return:.2f}%")
+            csv = df.to_csv(index=False).encode("utf-8")
+            st.download_button("Download Trade History CSV", csv, "dividend_strategy.csv", "text/csv")
     else:
-        st.success(f"{len(valid)} proven tickers found: {', '.join(valid)}")
+        st.warning("No data available to display. Try adjusting your inputs or using different tickers.")
         df = simulate_strategy(valid, buy_days, sell_days, years_back, starting_capital)
 
 if not df.empty and "Sell Date" in df.columns and "Portfolio Value" in df.columns:
