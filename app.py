@@ -10,24 +10,38 @@ st.caption("Momentum + income-weighted ETF rotation for dividend compounding")
 
 ETF_LIST = ["QDTE", "XDTE", "CHPY", "AIPI", "JEPQ"]
 MARKET = "QQQ"
-WINDOW = 120  # minutes
+WINDOW = 120
 
 # ==============================
-# SIDEBAR — HOLDINGS INPUT
+# HOLDINGS INPUT — MAIN PAGE
 # ==============================
 
-st.sidebar.header("📥 Your Current Holdings (Shares)")
+st.markdown("## 📥 Enter Your Current Holdings (Shares)")
+
+col1, col2, col3 = st.columns(3)
+
+with col1:
+    qdte_sh = st.number_input("QDTE Shares", value=110, step=1)
+    xdte_sh = st.number_input("XDTE Shares", value=69, step=1)
+
+with col2:
+    chpy_sh = st.number_input("CHPY Shares", value=55, step=1)
+    aipi_sh = st.number_input("AIPI Shares", value=14, step=1)
+
+with col3:
+    jepq_sh = st.number_input("JEPQ Shares", value=19, step=1)
 
 holdings = {
-    "QDTE": st.sidebar.number_input("QDTE shares", value=110, step=1),
-    "XDTE": st.sidebar.number_input("XDTE shares", value=69, step=1),
-    "CHPY": st.sidebar.number_input("CHPY shares", value=55, step=1),
-    "AIPI": st.sidebar.number_input("AIPI shares", value=14, step=1),
-    "JEPQ": st.sidebar.number_input("JEPQ shares", value=19, step=1),
+    "QDTE": qdte_sh,
+    "XDTE": xdte_sh,
+    "CHPY": chpy_sh,
+    "AIPI": aipi_sh,
+    "JEPQ": jepq_sh,
 }
 
-st.sidebar.markdown("---")
-cash_to_reinvest = st.sidebar.number_input("💵 Cash to deploy today ($)", value=300, step=50)
+cash_to_reinvest = st.number_input("💵 Cash to deploy today ($)", value=300, step=50)
+
+st.markdown("---")
 
 # ==============================
 # DATA
@@ -52,7 +66,7 @@ def get_intraday(ticker):
 # MARKET MODE
 # ==============================
 
-bench_chg, bench_vol, _, _ = get_intraday(MARKET)
+bench_chg, _, _, _ = get_intraday(MARKET)
 
 if bench_chg is None:
     st.warning("Market data not available yet. Try during market hours.")
@@ -81,6 +95,14 @@ st.metric("QQQ (last 120 min)", f"{bench_chg*100:.2f}%")
 rows = []
 total_value = 0
 
+income_weight = {
+    "QDTE": 0.6,
+    "XDTE": 0.6,
+    "CHPY": 1.0,
+    "AIPI": 1.1,
+    "JEPQ": 0.8
+}
+
 for etf in ETF_LIST:
     chg, vol, price, _ = get_intraday(etf)
     if chg is None:
@@ -90,40 +112,15 @@ for etf in ETF_LIST:
     value = shares * price
     total_value += value
 
-    rows.append([
-        etf, chg, vol, price, shares, value
-    ])
+    score = chg*100*40 + income_weight[etf]*10 - vol*1000*5
+
+    rows.append([etf, chg, vol, price, shares, value, score])
 
 df = pd.DataFrame(rows, columns=[
-    "ETF", "Momentum", "Volatility", "Price", "Shares", "Value"
+    "ETF", "Momentum", "Volatility", "Price", "Shares", "Value", "Score"
 ])
 
 df["Weight"] = df["Value"] / total_value
-
-# ==============================
-# INCOME WEIGHTING (STATIC — SAFE)
-# ==============================
-
-income_weight = {
-    "QDTE": 0.6,
-    "XDTE": 0.6,
-    "CHPY": 1.0,
-    "AIPI": 1.1,
-    "JEPQ": 0.8
-}
-
-df["IncomeBoost"] = df["ETF"].map(income_weight)
-
-# ==============================
-# SCORE
-# ==============================
-
-df["Score"] = (
-    df["Momentum"] * 100 * 40 +
-    df["IncomeBoost"] * 10 -
-    df["Volatility"] * 1000 * 5
-)
-
 df = df.sort_values("Score", ascending=False).reset_index(drop=True)
 
 # ==============================
@@ -168,14 +165,13 @@ styled = df.style.format({
 }).applymap(color_signal, subset=["Signal"])
 
 st.dataframe(styled, use_container_width=True)
-
 st.metric("💼 Portfolio Value", f"${total_value:,.0f}")
 
 # ==============================
 # ROTATION PLAN
 # ==============================
 
-st.markdown("## 🔄 Rotation Suggestions")
+st.markdown("## 🔄 What To Do Now")
 
 buys = df[df["Signal"] == "BUY"]
 sells = df[df["Signal"] == "REDUCE"]
@@ -194,4 +190,4 @@ else:
             buy_shares = int(cash_each // r["Price"])
             st.success(f"🟢 Add {r['ETF']} → buy ~{buy_shares} shares")
 
-st.caption("Engine uses momentum + income weighting + portfolio exposure. No ex-div timing used.")
+st.caption("Uses momentum + income weighting + portfolio exposure. Designed for weekly income rotation.")
