@@ -2,245 +2,164 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
-
-# ======================================================
-# PAGE
-# ======================================================
+import requests
+from datetime import datetime, timedelta
 
 st.set_page_config(page_title="Income Rotation Engine", layout="centered")
 st.title("🔥 Ultra-Aggressive Income Rotation Engine")
 st.caption("Momentum + income-weighted ETF rotation for dividend compounding")
 
-# ======================================================
-# SETTINGS
-# ======================================================
-
-ETF_LIST = ["QDTE", "XDTE", "CHPY", "JEPQ", "AIPI"]
+ETF_LIST = ["CHPY", "QDTE", "XDTE", "JEPQ", "AIPI"]
 MARKET = "QQQ"
 WINDOW = 120
 
-# Monthly income per share (editable)
-INCOME = {
-    "QDTE": 0.12,
-    "XDTE": 0.12,
-    "CHPY": 0.52,
-    "JEPQ": 0.57,
-    "AIPI": 1.20,
-}
-
-# ======================================================
-# HOLDINGS INPUT
-# ======================================================
-
-st.subheader("📥 Your Current Holdings")
-
-holdings = {}
-total_value = 0
-
-for etf in ETF_LIST:
-    shares = st.number_input(f"{etf} shares", min_value=0, value=0, step=1)
-    holdings[etf] = shares
-
-cash_balance = st.number_input("💵 Available Cash ($)", min_value=0.0, value=0.0, step=50.0)
-
-# ======================================================
+# ================================
 # DATA
-# ======================================================
+# ================================
 
 @st.cache_data(ttl=300)
 def get_intraday(ticker):
-    data = yf.download(ticker, period="1d", interval="1m", progress=False)
-    if data is None or len(data) < WINDOW:
+    df = yf.download(ticker, period="1d", interval="1m", progress=False)
+    if df is None or len(df) < WINDOW:
         return None
-    return data.tail(WINDOW)
+    return df.tail(WINDOW)
 
-def calc_metrics(df):
-    start = df["Close"].iloc[0]
-    end = df["Close"].iloc[-1]
-    momentum = (end - start) / start
-    vol = df["Close"].pct_change().std()
-    return momentum, vol
+@st.cache_data(ttl=3600)
+def get_next_exdiv(ticker):
+    try:
+        url = f"https://financialmodelingprep.com/api/v3/historical-price-full/stock_dividend/{ticker}?apikey=demo"
+        r = requests.get(url, timeout=10).json()
+        divs = r.get("historical", [])
+        today = datetime.utcnow().date()
 
-# ======================================================
+        for d in divs:
+            ex = datetime.strptime(d["date"], "%Y-%m-%d").date()
+            if ex >= today:
+                return ex, float(d["dividend"])
+    except:
+        pass
+    return None, None
+
+# ================================
 # MARKET MODE
-# ======================================================
+# ================================
 
-bench_df = get_intraday(MARKET)
-if bench_df is None:
-    st.warning("Market data not available yet. Try closer to market close.")
+bench = get_intraday(MARKET)
+
+if bench is None:
+    st.warning("Market data not available yet.")
     st.stop()
 
-bench_mom, bench_vol = calc_metrics(bench_df)
+bench_change = bench["Close"].iloc[-1] / bench["Close"].iloc[0] - 1
 
-if bench_mom > 0.003:
-    market_mode = "RISK-ON"
-elif bench_mom < -0.003:
-    market_mode = "RISK-OFF"
+if bench_change > 0.003:
+    mode = "RISK-ON"
+elif bench_change < -0.003:
+    mode = "RISK-OFF"
 else:
-    market_mode = "NEUTRAL"
+    mode = "NEUTRAL"
 
-if market_mode == "RISK-ON":
+if mode == "RISK-ON":
     st.success("🟢 MARKET MODE: RISK-ON")
-elif market_mode == "RISK-OFF":
+elif mode == "RISK-OFF":
     st.error("🔴 MARKET MODE: RISK-OFF")
 else:
     st.warning("🟡 MARKET MODE: NEUTRAL")
 
-st.metric("QQQ (last 120 min)", f"{bench_mom*100:.2f}%")
+st.metric("QQQ (last 2h)", f"{bench_change*100:.2f}%")
 
-# ======================================================
+# ================================
 # ETF ANALYSIS
-# ======================================================
+# ================================
 
 rows = []
-portfolio_value = 0
-monthly_income_now = 0
+today = datetime.utcnow().date()
 
 for etf in ETF_LIST:
-    df = get_intraday(etf)
-    if df is None:
+
+    data = get_intraday(etf)
+    if data is None:
         continue
 
-    mom, vol = calc_metrics(df)
-    rel = mom - bench_mom
-    price = float(df["Close"].iloc[-1])
-    income = INCOME.get(etf, 0)
+    chg = data["Close"].iloc[-1] / data["Close"].iloc[0] - 1
+    vol = data["Close"].pct_change().std()
 
-    value = holdings[etf] * price
-    portfolio_value += value
-    monthly_income_now += holdings[etf] * income
+    exdiv, dividend = get_next_exdiv(etf)
+    days = (exdiv - today).days if exdiv else None
 
-    score = (mom * 100 * 50) + (rel * 100 * 30) + (income * 10) - (vol * 1000 * 5)
+    income_score = 0
+    if dividend:
+        if dividend > 0.5: income_score = 3
+        elif dividend > 0.2: income_score = 2
+        else: income_score = 1
 
-    rows.append([etf, mom, rel, vol, income, price, score, value, df])
+    score = chg*100*40 - vol*1000*8 + income_score*6
 
-df_all = pd.DataFrame(rows, columns=[
-    "ETF", "Momentum", "RelStrength", "Volatility",
-    "Monthly Income", "Price", "Score", "Value", "Chart"
-])
+    if days is not None and 0 <= days <= 5:
+        score += 10
 
-df_all = df_all.sort_values("Score", ascending=False).reset_index(drop=True)
+    rows.append([
+        etf, chg, vol, score, exdiv, days, dividend
+    ])
 
-# ======================================================
-# ROTATION LOGIC
-# ======================================================
+df = pd.DataFrame(rows, columns=[
+    "ETF","Momentum","Volatility","Score","Next Ex-Div","Days","Dividend"
+]).sort_values("Score", ascending=False).reset_index(drop=True)
 
-top_etf = df_all.iloc[0]["ETF"]
+# ================================
+# SIGNALS
+# ================================
+
 signals = []
-sell_plan = []
-buy_plan = []
 
-rotation_cash = cash_balance
-
-for i, row in df_all.iterrows():
-
-    etf = row["ETF"]
-    shares = holdings[etf]
-
-    if market_mode == "RISK-OFF":
-        signal = "HOLD"
+for _, r in df.iterrows():
+    if r["Days"] is not None and r["Days"] <= 2:
+        sig = "HOLD (Ex-Div Soon)"
+    elif mode == "RISK-OFF" and r["Momentum"] < 0:
+        sig = "REDUCE"
+    elif r["Score"] > 10:
+        sig = "BUY"
     else:
-        if etf == top_etf:
-            signal = "BUY / ADD"
-        elif shares > 0 and row["Score"] < df_all.iloc[0]["Score"] * 0.6:
-            signal = f"ROTATE → {top_etf}"
+        sig = "WAIT"
+    signals.append(sig)
 
-            sell_value = shares * row["Price"]
-            rotation_cash += sell_value
-            sell_plan.append([etf, shares, sell_value])
-        else:
-            signal = "HOLD"
+df["Signal"] = signals
 
-    signals.append(signal)
-
-df_all["Signal"] = signals
-
-# ======================================================
-# BUY PLAN
-# ======================================================
-
-top_price = df_all[df_all["ETF"] == top_etf]["Price"].iloc[0]
-shares_to_buy = int(rotation_cash // top_price)
-buy_cost = shares_to_buy * top_price
-
-# ======================================================
+# ================================
 # DISPLAY
-# ======================================================
+# ================================
 
-st.subheader("📊 Rotation Rankings")
+st.subheader("📊 Rotation Ranking")
 
-def color_signal(val):
-    if "BUY" in val:
-        return "background-color:#b6f2c2"
-    if "ROTATE" in val:
-        return "background-color:#f7b2b2"
-    return ""
-
-styled = df_all.style.format({
-    "Momentum": "{:.2%}",
-    "RelStrength": "{:.2%}",
-    "Volatility": "{:.4f}",
-    "Monthly Income": "${:.2f}",
-    "Price": "${:.2f}",
-    "Score": "{:.1f}",
-    "Value": "${:,.0f}",
-}).applymap(color_signal, subset=["Signal"])
+styled = df.style.format({
+    "Momentum":"{:.2%}",
+    "Volatility":"{:.4f}",
+    "Dividend":"${:.2f}"
+}).applymap(
+    lambda x: "background-color:#b6f2c2" if x=="BUY" else
+              "background-color:#f7b2b2" if x=="REDUCE" else "",
+    subset=["Signal"]
+)
 
 st.dataframe(styled, use_container_width=True)
 
-# ======================================================
-# ROTATION ACTIONS
-# ======================================================
+# ================================
+# ACTION SUMMARY
+# ================================
 
-st.subheader("🔄 Suggested Trades")
+buys = df[df["Signal"]=="BUY"]["ETF"].tolist()
+holds = df[df["Signal"].str.contains("HOLD")]["ETF"].tolist()
+sells = df[df["Signal"]=="REDUCE"]["ETF"].tolist()
 
-if len(sell_plan) == 0 and shares_to_buy == 0:
-    st.info("No rotation needed today.")
-else:
-    if sell_plan:
-        st.markdown("### ❌ Sell")
-        sell_df = pd.DataFrame(sell_plan, columns=["ETF", "Shares", "Value $"])
-        st.dataframe(sell_df)
+st.subheader("🔄 Rotation Plan")
 
-    if shares_to_buy > 0:
-        st.markdown("### ✅ Buy")
-        st.success(f"Buy **{shares_to_buy} shares of {top_etf}** ≈ ${buy_cost:,.0f}")
+if buys:
+    st.success("🔥 Add to: " + ", ".join(buys))
+if holds:
+    st.info("📆 Hold for dividend: " + ", ".join(holds))
+if sells:
+    st.error("⬇ Reduce: " + ", ".join(sells))
+if not buys and not sells:
+    st.info("No strong rotation signals today.")
 
-# ======================================================
-# INCOME TRACKING
-# ======================================================
-
-new_income = monthly_income_now - sum(
-    s[1] * INCOME[s[0]] for s in sell_plan
-) + shares_to_buy * INCOME[top_etf]
-
-st.subheader("📈 Portfolio Income")
-
-col1, col2, col3 = st.columns(3)
-col1.metric("Monthly Income Now", f"${monthly_income_now:,.2f}")
-col2.metric("After Rotation", f"${new_income:,.2f}")
-col3.metric("Change", f"${new_income - monthly_income_now:+.2f}")
-
-# ======================================================
-# CHARTS
-# ======================================================
-
-st.subheader("📈 Last 120-Minute % Price Move")
-
-for _, row in df_all.iterrows():
-    chart = row["Chart"]
-    base = chart["Close"].iloc[0]
-    pct = (chart["Close"] / base - 1) * 100
-    st.line_chart(pct, height=130)
-
-# ======================================================
-# SUMMARY
-# ======================================================
-
-st.info(
-    f"Top rotation target: **{top_etf}** | "
-    f"Market mode: **{market_mode}** | "
-    f"Rotation cash: **${rotation_cash:,.0f}**"
-)
-
-st.caption("Signals combine momentum, relative strength vs QQQ, and income weighting.")
+st.caption("Model blends momentum, volatility, dividend size, and proximity to ex-div date.")
