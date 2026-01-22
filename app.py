@@ -13,7 +13,16 @@ st.caption("Weekly ETF compounding using momentum + market regime")
 
 ETF_LIST = ["CHPY", "QDTE", "XDTE", "JEPQ", "AIPI"]
 MARKET = "QQQ"
-WINDOW = 120 # minutes
+WINDOW = 120  # minutes
+
+# Dividend per share
+DIVIDENDS = {
+    "QDTE": {"amount": 0.12, "freq": "weekly"},
+    "XDTE": {"amount": 0.12, "freq": "weekly"},
+    "CHPY": {"amount": 0.52, "freq": "weekly"},
+    "JEPQ": {"amount": 0.57, "freq": "monthly"},
+    "AIPI": {"amount": 1.20, "freq": "monthly"},
+}
 
 # Ultra-Aggressive Allocation (Risk-On)
 AGGRESSIVE_ALLOC = {
@@ -41,7 +50,7 @@ DEFENSIVE_ALLOC = {
 def get_intraday_change(ticker):
     data = yf.download(ticker, period="1d", interval="1m", progress=False)
     if data is None or len(data) < WINDOW:
-        return None, None, None
+        return None, None
 
     recent = data.tail(WINDOW)
     start_price = float(recent["Close"].iloc[0])
@@ -49,13 +58,27 @@ def get_intraday_change(ticker):
     pct = (end_price - start_price) / start_price
     vol = recent["Close"].pct_change().std()
 
-    return float(pct), float(vol), recent
+    return float(pct), float(vol)
+
+@st.cache_data(ttl=300)
+def get_price(ticker):
+    data = yf.download(ticker, period="1d", interval="1m", progress=False)
+    if len(data) == 0:
+        return None
+    return float(data["Close"].iloc[-1])
+
+def monthly_income_per_share(ticker):
+    d = DIVIDENDS[ticker]
+    if d["freq"] == "weekly":
+        return d["amount"] * 4.33
+    else:
+        return d["amount"]
 
 # ======================================================
 # MARKET REGIME
 # ======================================================
 
-bench_chg, bench_vol, _ = get_intraday_change(MARKET)
+bench_chg, _ = get_intraday_change(MARKET)
 
 if bench_chg is None:
     st.warning("Market data not available yet. Try later in the session.")
@@ -80,41 +103,75 @@ st.metric("QQQ – Last 120 min", f"{bench_chg*100:.2f}%")
 alloc = AGGRESSIVE_ALLOC if market_mode != "DEFENSIVE" else DEFENSIVE_ALLOC
 
 # ======================================================
-# CASH INPUT
+# CURRENT HOLDINGS INPUT
+# ======================================================
+
+st.markdown("## 📦 Your Current Shares")
+
+holdings = {}
+cols = st.columns(len(ETF_LIST))
+
+for i, etf in enumerate(ETF_LIST):
+    with cols[i]:
+        holdings[etf] = st.number_input(etf, min_value=0, value=0, step=1)
+
+# ======================================================
+# CURRENT INCOME
+# ======================================================
+
+monthly_income = 0
+weekly_income = 0
+
+for etf, shares in holdings.items():
+    m = monthly_income_per_share(etf) * shares
+    monthly_income += m
+    if DIVIDENDS[etf]["freq"] == "weekly":
+        weekly_income += DIVIDENDS[etf]["amount"] * shares
+
+annual_income = monthly_income * 12
+
+st.markdown("## 💵 Current Income")
+
+c1, c2, c3 = st.columns(3)
+c1.metric("Weekly", f"${weekly_income:,.2f}")
+c2.metric("Monthly", f"${monthly_income:,.2f}")
+c3.metric("Annual", f"${annual_income:,.0f}")
+
+# ======================================================
+# REINVESTMENT
 # ======================================================
 
 st.markdown("## 💵 Reinvestment Amount")
 cash = st.number_input("Cash to invest today ($)", min_value=0, value=300, step=50)
 
-# ======================================================
-# ETF MOMENTUM + ALLOCATION
-# ======================================================
-
 rows = []
+new_monthly_income = monthly_income
 
 for etf in ETF_LIST:
-    chg, vol, _ = get_intraday_change(etf)
-    if chg is None:
+    chg, vol = get_intraday_change(etf)
+    price = get_price(etf)
+
+    if chg is None or price is None:
         continue
 
-    price_data = yf.download(etf, period="1d", interval="1m", progress=False)
-    price = float(price_data["Close"].iloc[-1])
-
     dollars = cash * alloc[etf]
-    shares = int(dollars // price)
+    shares_to_buy = int(dollars // price)
+
+    inc = monthly_income_per_share(etf) * shares_to_buy
+    new_monthly_income += inc
 
     rows.append([
         etf,
         chg,
-        vol,
         alloc[etf],
         dollars,
-        shares,
-        price
+        shares_to_buy,
+        price,
+        inc
     ])
 
 df = pd.DataFrame(rows, columns=[
-    "ETF", "Momentum", "Volatility", "Target %", "$ Allocation", "Shares to Buy", "Price"
+    "ETF", "Momentum", "Target %", "$ Allocation", "Shares to Buy", "Price", "Monthly Income +"
 ])
 
 df = df.sort_values("Momentum", ascending=False).reset_index(drop=True)
@@ -140,7 +197,7 @@ for i, row in df.iterrows():
 df["Signal"] = signals
 
 # ======================================================
-# DISPLAY TABLE
+# DISPLAY
 # ======================================================
 
 st.markdown("## 📊 What To Buy This Week")
@@ -154,24 +211,26 @@ def color_signal(val):
 
 styled = df.style.format({
     "Momentum": "{:.2%}",
-    "Volatility": "{:.4f}",
     "Target %": "{:.0%}",
     "$ Allocation": "${:,.0f}",
-    "Price": "${:.2f}"
+    "Price": "${:.2f}",
+    "Monthly Income +": "${:.2f}"
 }).applymap(color_signal, subset=["Signal"])
 
 st.dataframe(styled, use_container_width=True)
 
 # ======================================================
-# SIMPLE ACTION SUMMARY
+# INCOME PROJECTION
 # ======================================================
 
-buys = df[df["Signal"] == "BUY"]
+st.markdown("## 🎯 Income After This Reinvestment")
 
-if len(buys) == 0:
-    st.info("No strong buy signals right now. Consider waiting or defensive rotation.")
-else:
-    top = ", ".join(buys["ETF"].tolist())
-    st.success(f"🔥 Focus buys on: {top}")
+increase = new_monthly_income - monthly_income
 
-st.caption("Logic: Market regime via QQQ last 120 min + ETF momentum ranking + aggressive income weighting.")
+p1, p2, p3 = st.columns(3)
+p1.metric("New Monthly Income", f"${new_monthly_income:,.2f}", f"+${increase:,.2f}")
+p2.metric("Months to $500/mo", f"{max(0, int((500 - new_monthly_income) / max(increase,1)))}")
+p3.metric("Months to $1,000/mo", f"{max(0, int((1000 - new_monthly_income) / max(increase,1)))}")
+
+st.caption("Projection assumes similar reinvestment size and dividend stability.")
+
