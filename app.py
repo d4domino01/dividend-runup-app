@@ -11,7 +11,7 @@ import pytz
 
 st.set_page_config(page_title="Income Rotation Engine", layout="centered")
 st.title("🔥 Ultra-Aggressive Income Rotation Engine")
-st.caption("Momentum + income-weighted ETF rotation for compounding")
+st.caption("Momentum + income-weighted ETF rotation for dividend compounding")
 
 # ======================================================
 # SETTINGS
@@ -20,9 +20,9 @@ st.caption("Momentum + income-weighted ETF rotation for compounding")
 ETF_LIST = ["CHPY", "QDTE", "XDTE", "JEPQ", "AIPI"]
 MARKET = "QQQ"
 
-FALLBACK_WINDOWS = [120, 60, 30]
+WINDOWS = [120, 60, 30]
 
-# Dividend power (monthly / weekly equivalents)
+# Your income numbers
 INCOME_POWER = {
     "QDTE": 0.12,
     "XDTE": 0.12,
@@ -61,10 +61,10 @@ market_is_open = market_open <= now <= market_close
 if market_is_open:
     st.success("📈 Market OPEN — using live intraday momentum")
 else:
-    st.info("🕒 Market CLOSED — using last session momentum")
+    st.info("🕒 Market CLOSED — using last session data")
 
 # ======================================================
-# DATA
+# DATA HELPERS
 # ======================================================
 
 @st.cache_data(ttl=300)
@@ -75,7 +75,7 @@ def get_intraday_change(ticker):
     if data is None or len(data) < 30:
         return None, None, None, None
 
-    for win in FALLBACK_WINDOWS:
+    for win in WINDOWS:
         if len(data) >= win:
             recent = data.tail(win)
             start = float(recent["Close"].iloc[0])
@@ -86,6 +86,12 @@ def get_intraday_change(ticker):
 
     return None, None, None, None
 
+
+@st.cache_data(ttl=300)
+def get_last_price(ticker):
+    d = yf.download(ticker, period="5d", interval="1d", progress=False)
+    return float(d["Close"].dropna().iloc[-1])
+
 # ======================================================
 # MARKET REGIME
 # ======================================================
@@ -93,7 +99,7 @@ def get_intraday_change(ticker):
 bench_chg, bench_vol, _, bench_window = get_intraday_change(MARKET)
 
 if bench_chg is None:
-    st.error("Not enough intraday data available from Yahoo.")
+    st.error("Yahoo did not return intraday data yet. Try again in a few minutes.")
     st.stop()
 
 if bench_chg > 0.003:
@@ -104,61 +110,61 @@ else:
     market_mode = "NEUTRAL"
 
 if market_mode == "AGGRESSIVE":
-    st.success("🟢 MARKET MODE: AGGRESSIVE (risk-on)")
+    st.success("🟢 MARKET MODE: AGGRESSIVE")
 elif market_mode == "DEFENSIVE":
-    st.error("🔴 MARKET MODE: DEFENSIVE (risk-off)")
+    st.error("🔴 MARKET MODE: DEFENSIVE")
 else:
     st.warning("🟡 MARKET MODE: NEUTRAL")
 
-st.metric(f"QQQ – Last {bench_window} min", f"{bench_chg*100:.2f}%")
+st.metric(f"QQQ – last {bench_window} min", f"{bench_chg*100:.2f}%")
 
 alloc = AGGRESSIVE_ALLOC if market_mode != "DEFENSIVE" else DEFENSIVE_ALLOC
 
 # ======================================================
-# CASH INPUT
+# PORTFOLIO INPUT (A)
 # ======================================================
 
-st.markdown("## 💵 Reinvestment Amount")
-cash = st.number_input("Cash to deploy today ($)", min_value=0, value=300, step=50)
+st.markdown("## 📦 Your Current Holdings")
+
+portfolio = {}
+
+cols = st.columns(len(ETF_LIST))
+
+for i, etf in enumerate(ETF_LIST):
+    portfolio[etf] = cols[i].number_input(f"{etf} shares", min_value=0, value=0, step=1)
 
 # ======================================================
 # ETF SCORING
 # ======================================================
 
 rows = []
-
 max_income = max(INCOME_POWER.values())
 
 for etf in ETF_LIST:
+
     chg, vol, _, used_window = get_intraday_change(etf)
     if chg is None:
         continue
 
-    price_data = yf.download(etf, period="1d", interval="1m", progress=False)
-    price = float(price_data["Close"].dropna().iloc[-1])
-
+    price = get_last_price(etf)
     income_weight = INCOME_POWER[etf] / max_income
 
-    # Core score: momentum + income bias – volatility
     score = (chg * 100 * 40) + (income_weight * 25) - (vol * 1000 * 10)
-
-    dollars = cash * alloc[etf]
-    shares = int(dollars // price)
 
     rows.append([
         etf, chg, vol, income_weight, score,
-        alloc[etf], dollars, shares, price, used_window
+        alloc[etf], price, used_window
     ])
 
 df = pd.DataFrame(rows, columns=[
     "ETF", "Momentum", "Volatility", "IncomeWeight", "Score",
-    "Target %", "$ Allocation", "Shares to Buy", "Price", "Window(min)"
+    "Target %", "Price", "Window(min)"
 ])
 
 df = df.sort_values("Score", ascending=False).reset_index(drop=True)
 
 # ======================================================
-# SIGNALS (BUY / WAIT / SELL)
+# SIGNALS
 # ======================================================
 
 signals = []
@@ -180,10 +186,27 @@ for i, row in df.iterrows():
 df["Signal"] = signals
 
 # ======================================================
+# INCOME FORECAST (D)
+# ======================================================
+
+income_rows = []
+total_monthly = 0
+
+for etf in ETF_LIST:
+    shares = portfolio.get(etf, 0)
+    monthly = shares * INCOME_POWER[etf]
+    total_monthly += monthly
+    income_rows.append([etf, shares, monthly])
+
+income_df = pd.DataFrame(income_rows, columns=["ETF", "Shares", "Monthly Income $"])
+
+weekly_income = total_monthly / 4.3
+
+# ======================================================
 # DISPLAY
 # ======================================================
 
-st.markdown("## 📊 Rotation Table")
+st.markdown("## 📊 Rotation Signals")
 
 def color_signal(val):
     if val == "BUY":
@@ -198,7 +221,6 @@ styled = df.style.format({
     "IncomeWeight": "{:.2f}",
     "Score": "{:.1f}",
     "Target %": "{:.0%}",
-    "$ Allocation": "${:,.0f}",
     "Price": "${:.2f}"
 }).applymap(color_signal, subset=["Signal"])
 
@@ -216,11 +238,24 @@ st.markdown("## ⚡ Action Plan")
 if buys:
     st.success(f"✅ BUY / ADD: {', '.join(buys)}")
 else:
-    st.info("No strong buy setups right now.")
+    st.info("No strong buys right now.")
 
 if sells:
-    st.error(f"🔴 SELL / TRIM: {', '.join(sells)} → Rotate into leaders")
+    st.error(f"🔴 SELL / TRIM: {', '.join(sells)} → rotate into leaders")
 else:
     st.info("No forced sells today.")
 
-st.caption("Scoring = Momentum + Income Bias – Volatility. Designed for aggressive dividend compounding.")
+# ======================================================
+# INCOME DASHBOARD
+# ======================================================
+
+st.markdown("## 💰 Income Tracker")
+
+col1, col2, col3 = st.columns(3)
+col1.metric("Monthly Income", f"${total_monthly:,.2f}")
+col2.metric("Weekly Income", f"${weekly_income:,.2f}")
+col3.metric("Target Progress", f"{(total_monthly/1000)*100:.1f}%")
+
+st.dataframe(income_df)
+
+st.caption("Goal: $1,000/month dividend income — aggressive rotation to reach it faster.")
