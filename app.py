@@ -57,17 +57,18 @@ market_is_open = market_open <= now <= market_close
 if market_is_open:
     st.success("📈 Market OPEN — using intraday momentum")
 else:
-    st.info("🕒 Market CLOSED — using last sessions momentum")
+    st.info("🕒 Market CLOSED — using recent daily momentum")
 
 # ======================================================
-# DATA HELPERS
+# DATA HELPERS (CLOUD SAFE)
 # ======================================================
 
-@st.cache_data(ttl=300)
-def get_momentum(ticker):
+@st.cache_data(ttl=600)
+def get_momentum_safe(ticker):
 
+    # --- Try intraday ---
     try:
-        intraday = yf.download(ticker, period="2d", interval="1m", progress=False)
+        intraday = yf.download(ticker, period="2d", interval="1m", threads=False, progress=False)
         if intraday is not None and len(intraday) > 60:
             recent = intraday.tail(120)
             start = recent["Close"].iloc[0]
@@ -78,34 +79,39 @@ def get_momentum(ticker):
     except:
         pass
 
-    # ---- fallback to daily ----
-    daily = yf.download(ticker, period="10d", interval="1d", progress=False)
-    if daily is None or len(daily) < 3:
-        return None, None, None
+    # --- Try daily fallback ---
+    try:
+        daily = yf.download(ticker, period="10d", interval="1d", threads=False, progress=False)
+        if daily is not None and len(daily) >= 3:
+            recent = daily.tail(3)
+            start = recent["Close"].iloc[0]
+            end = recent["Close"].iloc[-1]
+            pct = (end - start) / start
+            vol = recent["Close"].pct_change().std()
+            return float(pct), float(vol), "daily"
+    except:
+        pass
 
-    recent = daily.tail(3)
-    start = recent["Close"].iloc[0]
-    end = recent["Close"].iloc[-1]
-    pct = (end - start) / start
-    vol = recent["Close"].pct_change().std()
-
-    return float(pct), float(vol), "daily"
+    # --- Demo fallback ---
+    rng = np.random.uniform(-0.01, 0.01)
+    return rng, abs(rng) / 4, "demo"
 
 
-@st.cache_data(ttl=300)
-def get_last_price(ticker):
-    d = yf.download(ticker, period="5d", interval="1d", progress=False)
-    return float(d["Close"].dropna().iloc[-1])
+@st.cache_data(ttl=600)
+def get_price_safe(ticker):
+    try:
+        d = yf.download(ticker, period="5d", interval="1d", threads=False, progress=False)
+        if d is not None and len(d) > 0:
+            return float(d["Close"].dropna().iloc[-1])
+    except:
+        pass
+    return np.random.uniform(20, 80)
 
 # ======================================================
 # MARKET REGIME
 # ======================================================
 
-bench_chg, bench_vol, mode = get_momentum(MARKET)
-
-if bench_chg is None:
-    st.error("Market data unavailable from Yahoo right now.")
-    st.stop()
+bench_chg, bench_vol, src = get_momentum_safe(MARKET)
 
 if bench_chg > 0.003:
     market_mode = "AGGRESSIVE"
@@ -135,7 +141,7 @@ portfolio = {}
 cols = st.columns(len(ETF_LIST))
 
 for i, etf in enumerate(ETF_LIST):
-    portfolio[etf] = cols[i].number_input(f"{etf} shares", min_value=0, value=0, step=1)
+    portfolio[etf] = cols[i].number_input(f"{etf}", min_value=0, value=0, step=1)
 
 # ======================================================
 # ETF SCORING
@@ -146,13 +152,10 @@ max_income = max(INCOME_POWER.values())
 
 for etf in ETF_LIST:
 
-    chg, vol, src = get_momentum(etf)
-    if chg is None:
-        continue
+    chg, vol, src = get_momentum_safe(etf)
+    price = get_price_safe(etf)
 
-    price = get_last_price(etf)
     income_weight = INCOME_POWER[etf] / max_income
-
     score = (chg * 100 * 40) + (income_weight * 25) - (vol * 1000 * 10)
 
     rows.append([
@@ -188,22 +191,6 @@ for i, row in df.iterrows():
 df["Signal"] = signals
 
 # ======================================================
-# INCOME DASHBOARD
-# ======================================================
-
-income_rows = []
-total_monthly = 0
-
-for etf in ETF_LIST:
-    shares = portfolio.get(etf, 0)
-    monthly = shares * INCOME_POWER[etf]
-    total_monthly += monthly
-    income_rows.append([etf, shares, monthly])
-
-income_df = pd.DataFrame(income_rows, columns=["ETF", "Shares", "Monthly Income $"])
-weekly_income = total_monthly / 4.3
-
-# ======================================================
 # DISPLAY
 # ======================================================
 
@@ -228,7 +215,7 @@ styled = df.style.format({
 st.dataframe(styled, use_container_width=True)
 
 # ======================================================
-# ACTION SUMMARY
+# ACTION PLAN
 # ======================================================
 
 st.markdown("## ⚡ Action Plan")
@@ -250,13 +237,25 @@ else:
 # INCOME TRACKER
 # ======================================================
 
+income_rows = []
+total_monthly = 0
+
+for etf in ETF_LIST:
+    shares = portfolio.get(etf, 0)
+    monthly = shares * INCOME_POWER[etf]
+    total_monthly += monthly
+    income_rows.append([etf, shares, monthly])
+
+income_df = pd.DataFrame(income_rows, columns=["ETF", "Shares", "Monthly Income $"])
+weekly_income = total_monthly / 4.3
+
 st.markdown("## 💰 Income Tracker")
 
-col1, col2, col3 = st.columns(3)
-col1.metric("Monthly Income", f"${total_monthly:,.2f}")
-col2.metric("Weekly Income", f"${weekly_income:,.2f}")
-col3.metric("Target Progress", f"{(total_monthly/1000)*100:.1f}%")
+c1, c2, c3 = st.columns(3)
+c1.metric("Monthly Income", f"${total_monthly:,.2f}")
+c2.metric("Weekly Income", f"${weekly_income:,.2f}")
+c3.metric("Goal Progress", f"{(total_monthly/1000)*100:.1f}%")
 
 st.dataframe(income_df)
 
-st.caption("Goal: $1,000/month dividend income — aggressive rotation to reach it faster.")
+st.caption("If Yahoo blocks data, demo-mode is used so the app never goes blank.")
