@@ -9,9 +9,9 @@ import pytz
 # PAGE
 # ======================================================
 
-st.set_page_config(page_title="Income Rotation Engine", layout="centered")
-st.title("🔥 Ultra-Aggressive Income Rotation Engine")
-st.caption("Weekly ETF compounding using momentum + market regime (last 120 minutes)")
+st.set_page_config(page_title="Income ETF Power-Hour Engine", layout="centered")
+st.title("🔥 Income ETF Power-Hour Decision Engine")
+st.caption("Ultra-aggressive income rotation — intraday momentum engine")
 
 # ======================================================
 # SETTINGS
@@ -19,9 +19,10 @@ st.caption("Weekly ETF compounding using momentum + market regime (last 120 minu
 
 ETF_LIST = ["CHPY", "QDTE", "XDTE", "JEPQ", "AIPI"]
 MARKET = "QQQ"
-WINDOW = 120  # minutes
 
-# Ultra-Aggressive Allocation (Risk-On)
+MAX_WINDOW = 120
+FALLBACK_WINDOWS = [120, 60, 30]
+
 AGGRESSIVE_ALLOC = {
     "CHPY": 0.30,
     "QDTE": 0.30,
@@ -30,7 +31,6 @@ AGGRESSIVE_ALLOC = {
     "AIPI": 0.05,
 }
 
-# Defensive Allocation (Risk-Off)
 DEFENSIVE_ALLOC = {
     "CHPY": 0.10,
     "QDTE": 0.25,
@@ -52,9 +52,9 @@ market_close = time(16, 0)
 market_is_open = market_open <= now <= market_close
 
 if market_is_open:
-    st.success("📈 Market Status: OPEN — using live power-hour data")
+    st.success("📈 Market OPEN — using live intraday momentum")
 else:
-    st.info("🕒 Market Status: CLOSED — using last session close momentum")
+    st.info("🕒 Market CLOSED — using last session momentum")
 
 # ======================================================
 # DATA
@@ -62,28 +62,31 @@ else:
 
 @st.cache_data(ttl=300)
 def get_intraday_change(ticker):
+
     data = yf.download(ticker, period="2d", interval="1m", progress=False)
 
-    if data is None or len(data) < WINDOW:
-        return None, None, None
+    if data is None or len(data) < 30:
+        return None, None, None, None
 
-    recent = data.tail(WINDOW)
-    start_price = float(recent["Close"].iloc[0])
-    end_price = float(recent["Close"].iloc[-1])
+    for win in FALLBACK_WINDOWS:
+        if len(data) >= win:
+            recent = data.tail(win)
+            start = float(recent["Close"].iloc[0])
+            end = float(recent["Close"].iloc[-1])
+            pct = (end - start) / start
+            vol = recent["Close"].pct_change().std()
+            return pct, vol, recent, win
 
-    pct = (end_price - start_price) / start_price
-    vol = recent["Close"].pct_change().std()
-
-    return float(pct), float(vol), recent
+    return None, None, None, None
 
 # ======================================================
 # MARKET REGIME
 # ======================================================
 
-bench_chg, bench_vol, _ = get_intraday_change(MARKET)
+bench_chg, bench_vol, _, bench_window = get_intraday_change(MARKET)
 
 if bench_chg is None:
-    st.error("Not enough intraday data available.")
+    st.error("Not enough intraday data available from Yahoo.")
     st.stop()
 
 if bench_chg > 0.003:
@@ -100,7 +103,7 @@ elif market_mode == "DEFENSIVE":
 else:
     st.warning("🟡 MARKET MODE: NEUTRAL")
 
-st.metric("QQQ – Last 120 min", f"{bench_chg*100:.2f}%")
+st.metric(f"QQQ – Last {bench_window} min", f"{bench_chg*100:.2f}%")
 
 alloc = AGGRESSIVE_ALLOC if market_mode != "DEFENSIVE" else DEFENSIVE_ALLOC
 
@@ -118,7 +121,7 @@ cash = st.number_input("Cash to invest today ($)", min_value=0, value=300, step=
 rows = []
 
 for etf in ETF_LIST:
-    chg, vol, _ = get_intraday_change(etf)
+    chg, vol, _, used_window = get_intraday_change(etf)
     if chg is None:
         continue
 
@@ -135,11 +138,13 @@ for etf in ETF_LIST:
         alloc[etf],
         dollars,
         shares,
-        price
+        price,
+        used_window
     ])
 
 df = pd.DataFrame(rows, columns=[
-    "ETF", "Momentum", "Volatility", "Target %", "$ Allocation", "Shares to Buy", "Price"
+    "ETF", "Momentum", "Volatility", "Target %", "$ Allocation",
+    "Shares to Buy", "Price", "Window(min)"
 ])
 
 df = df.sort_values("Momentum", ascending=False).reset_index(drop=True)
@@ -165,10 +170,10 @@ for i, row in df.iterrows():
 df["Signal"] = signals
 
 # ======================================================
-# DISPLAY TABLE
+# DISPLAY
 # ======================================================
 
-st.markdown("## 📊 What To Buy This Session")
+st.markdown("## 📊 What To Buy / Hold / Reduce")
 
 def color_signal(val):
     if val == "BUY":
@@ -188,15 +193,15 @@ styled = df.style.format({
 st.dataframe(styled, use_container_width=True)
 
 # ======================================================
-# SIMPLE ACTION SUMMARY
+# SUMMARY
 # ======================================================
 
 buys = df[df["Signal"] == "BUY"]
 
 if len(buys) == 0:
-    st.info("No strong buy signals right now. Consider waiting or defensive rotation.")
+    st.info("No strong buy signals right now. Wait or rotate defensively.")
 else:
     top = ", ".join(buys["ETF"].tolist())
     st.success(f"🔥 Focus buys on: {top}")
 
-st.caption("Logic: Market regime via QQQ last 120 min + ETF momentum ranking + aggressive income weighting.")
+st.caption("Signals based on best available intraday momentum window + market regime filter.")
