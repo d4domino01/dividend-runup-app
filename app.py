@@ -20,9 +20,6 @@ st.caption("Momentum + income-weighted ETF rotation for dividend compounding")
 ETF_LIST = ["CHPY", "QDTE", "XDTE", "JEPQ", "AIPI"]
 MARKET = "QQQ"
 
-WINDOWS = [120, 60, 30]
-
-# Your income numbers
 INCOME_POWER = {
     "QDTE": 0.12,
     "XDTE": 0.12,
@@ -53,38 +50,46 @@ DEFENSIVE_ALLOC = {
 
 eastern = pytz.timezone("US/Eastern")
 now = datetime.now(eastern).time()
-
 market_open = time(9, 30)
 market_close = time(16, 0)
 market_is_open = market_open <= now <= market_close
 
 if market_is_open:
-    st.success("📈 Market OPEN — using live intraday momentum")
+    st.success("📈 Market OPEN — using intraday momentum")
 else:
-    st.info("🕒 Market CLOSED — using last session data")
+    st.info("🕒 Market CLOSED — using last sessions momentum")
 
 # ======================================================
 # DATA HELPERS
 # ======================================================
 
 @st.cache_data(ttl=300)
-def get_intraday_change(ticker):
+def get_momentum(ticker):
 
-    data = yf.download(ticker, period="2d", interval="1m", progress=False)
-
-    if data is None or len(data) < 30:
-        return None, None, None, None
-
-    for win in WINDOWS:
-        if len(data) >= win:
-            recent = data.tail(win)
-            start = float(recent["Close"].iloc[0])
-            end = float(recent["Close"].iloc[-1])
+    try:
+        intraday = yf.download(ticker, period="2d", interval="1m", progress=False)
+        if intraday is not None and len(intraday) > 60:
+            recent = intraday.tail(120)
+            start = recent["Close"].iloc[0]
+            end = recent["Close"].iloc[-1]
             pct = (end - start) / start
             vol = recent["Close"].pct_change().std()
-            return pct, vol, recent, win
+            return float(pct), float(vol), "intraday"
+    except:
+        pass
 
-    return None, None, None, None
+    # ---- fallback to daily ----
+    daily = yf.download(ticker, period="10d", interval="1d", progress=False)
+    if daily is None or len(daily) < 3:
+        return None, None, None
+
+    recent = daily.tail(3)
+    start = recent["Close"].iloc[0]
+    end = recent["Close"].iloc[-1]
+    pct = (end - start) / start
+    vol = recent["Close"].pct_change().std()
+
+    return float(pct), float(vol), "daily"
 
 
 @st.cache_data(ttl=300)
@@ -96,10 +101,10 @@ def get_last_price(ticker):
 # MARKET REGIME
 # ======================================================
 
-bench_chg, bench_vol, _, bench_window = get_intraday_change(MARKET)
+bench_chg, bench_vol, mode = get_momentum(MARKET)
 
 if bench_chg is None:
-    st.error("Yahoo did not return intraday data yet. Try again in a few minutes.")
+    st.error("Market data unavailable from Yahoo right now.")
     st.stop()
 
 if bench_chg > 0.003:
@@ -116,18 +121,17 @@ elif market_mode == "DEFENSIVE":
 else:
     st.warning("🟡 MARKET MODE: NEUTRAL")
 
-st.metric(f"QQQ – last {bench_window} min", f"{bench_chg*100:.2f}%")
+st.metric("Market Momentum (QQQ)", f"{bench_chg*100:.2f}%")
 
 alloc = AGGRESSIVE_ALLOC if market_mode != "DEFENSIVE" else DEFENSIVE_ALLOC
 
 # ======================================================
-# PORTFOLIO INPUT (A)
+# PORTFOLIO INPUT
 # ======================================================
 
 st.markdown("## 📦 Your Current Holdings")
 
 portfolio = {}
-
 cols = st.columns(len(ETF_LIST))
 
 for i, etf in enumerate(ETF_LIST):
@@ -142,7 +146,7 @@ max_income = max(INCOME_POWER.values())
 
 for etf in ETF_LIST:
 
-    chg, vol, _, used_window = get_intraday_change(etf)
+    chg, vol, src = get_momentum(etf)
     if chg is None:
         continue
 
@@ -153,12 +157,12 @@ for etf in ETF_LIST:
 
     rows.append([
         etf, chg, vol, income_weight, score,
-        alloc[etf], price, used_window
+        alloc[etf], price, src
     ])
 
 df = pd.DataFrame(rows, columns=[
     "ETF", "Momentum", "Volatility", "IncomeWeight", "Score",
-    "Target %", "Price", "Window(min)"
+    "Target %", "Price", "DataSource"
 ])
 
 df = df.sort_values("Score", ascending=False).reset_index(drop=True)
@@ -170,23 +174,21 @@ df = df.sort_values("Score", ascending=False).reset_index(drop=True)
 signals = []
 
 for i, row in df.iterrows():
-
     if market_mode == "DEFENSIVE":
         signal = "SELL" if row["Momentum"] < 0 else "WAIT"
     else:
         if i < 2:
             signal = "BUY"
-        elif row["Momentum"] < -0.003 and i >= 3:
+        elif row["Momentum"] < -0.003:
             signal = "SELL"
         else:
             signal = "WAIT"
-
     signals.append(signal)
 
 df["Signal"] = signals
 
 # ======================================================
-# INCOME FORECAST (D)
+# INCOME DASHBOARD
 # ======================================================
 
 income_rows = []
@@ -199,7 +201,6 @@ for etf in ETF_LIST:
     income_rows.append([etf, shares, monthly])
 
 income_df = pd.DataFrame(income_rows, columns=["ETF", "Shares", "Monthly Income $"])
-
 weekly_income = total_monthly / 4.3
 
 # ======================================================
@@ -230,10 +231,10 @@ st.dataframe(styled, use_container_width=True)
 # ACTION SUMMARY
 # ======================================================
 
+st.markdown("## ⚡ Action Plan")
+
 buys = df[df["Signal"] == "BUY"]["ETF"].tolist()
 sells = df[df["Signal"] == "SELL"]["ETF"].tolist()
-
-st.markdown("## ⚡ Action Plan")
 
 if buys:
     st.success(f"✅ BUY / ADD: {', '.join(buys)}")
@@ -246,7 +247,7 @@ else:
     st.info("No forced sells today.")
 
 # ======================================================
-# INCOME DASHBOARD
+# INCOME TRACKER
 # ======================================================
 
 st.markdown("## 💰 Income Tracker")
