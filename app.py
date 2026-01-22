@@ -234,3 +234,4 @@ p3.metric("Months to $1,000/mo", f"{max(0, int((1000 - new_monthly_income) / max
 
 st.caption("Projection assumes similar reinvestment size and dividend stability.")
 
+
